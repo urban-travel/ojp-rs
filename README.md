@@ -1,3 +1,8 @@
+[![Crates.io](https://img.shields.io/crates/v/ojp-rs.svg)](https://crates.io/crates/ojp-rs)
+[![Documentation](https://docs.rs/ojp-rs/badge.svg)](https://docs.rs/ojp-rs/)
+[![Codecov](https://codecov.io/gh/urban-travel/ojp-rs/graph/badge.svg?token=IO4NWPBZHQ)](https://codecov.io/gh/urban-travel/ojp-rs)
+[![Dependency status](https://deps.rs/repo/github/urban-travel/ojp-rs/status.svg)](https://deps.rs/repo/github/urban-travel/ojp-rs)
+
 # OJP-RS
 
 The `ojp-rs` crate is a Rust library for interacting with Open Journey Planner (OJP) services, a European 
