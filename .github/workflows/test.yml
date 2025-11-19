@@ -39,13 +39,21 @@ jobs:
         run: cargo generate-lockfile
       # https://twitter.com/jonhoo/status/1571290371124260865
       - name: cargo test --locked
+        env: # Or as an environment variable
+          TOKEN: ${{ secrets.TOKEN }}
         run: cargo test --locked --all-features --all-targets
       - name: cargo test --locked --ignored
+        env: # Or as an environment variable
+          TOKEN: ${{ secrets.TOKEN }}
         run: cargo test --locked --all-features --all-targets -- --ignored --test-threads=1
       # https://github.com/rust-lang/cargo/issues/6669
       - name: cargo test --doc
+        env: # Or as an environment variable
+          TOKEN: ${{ secrets.TOKEN }}
         run: cargo test --locked --all-features --doc
       - name: cargo test --doc --locked --ignored
+        env: # Or as an environment variable
+          TOKEN: ${{ secrets.TOKEN }}
         run: cargo test --locked --all-features --doc -- --ignored --test-threads=1
   minimal:
     # This action chooses the oldest version of the dependencies permitted by Cargo.toml to ensure
@@ -85,6 +93,8 @@ jobs:
       - name: cargo update -Zminimal-versions
         run: cargo +nightly update -Zminimal-versions
       - name: cargo test
+        env: # Or as an environment variable
+          TOKEN: ${{ secrets.TOKEN }}
         run: cargo test --locked --all-features --all-targets
   os-check:
     # run cargo test on mac and windows
@@ -110,6 +120,8 @@ jobs:
         if: hashFiles('Cargo.lock') == ''
         run: cargo generate-lockfile
       - name: cargo test
+        env: # Or as an environment variable
+          TOKEN: ${{ secrets.TOKEN }}
         run: cargo test --locked --all-features --all-targets
       - name: cargo run
         env: # Or as an environment variable
