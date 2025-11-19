@@ -200,6 +200,31 @@ pub struct OJP {
 }
 
 impl OJP {
+    pub async fn find_location(
+        location: &str,
+        date_time: NaiveDateTime,
+        number_results: u32,
+        requestor_ref: &str,
+        api_key: &str,
+    ) -> Result<Vec<i32>, OjpError> {
+        let response = RequestBuilder::new(date_time)
+            .set_token(token(api_key)?.expose_secret())
+            .set_name(location)
+            .set_number_results(number_results)
+            .set_request_type(RequestType::LocationInformation)
+            .set_requestor_ref(requestor_ref)
+            .send_request()
+            .await?;
+
+        let ojp = OJP::try_from(response.as_str())?;
+        let place_result = ojp
+            .place_results()
+            .ok_or(OjpError::PlaceResultsNotFound)?
+            .into_iter()
+            .filter_map(|pr| pr.stop_place_ref())
+            .collect::<Vec<_>>();
+        Ok::<Vec<i32>, OjpError>(place_result)
+    }
     /// Given an array of `&str` containing names of places, returns  Finds `number_results` trip `from_id` to `to_id` at `date_time` using the OJP API.
     /// The name of the environment variable needs to be profived through the varibale `api_key`.
     pub async fn find_locations(
@@ -212,23 +237,7 @@ impl OJP {
         let point_ref = locations
             .iter()
             .map(|&tc| async move {
-                let response = RequestBuilder::new(date_time)
-                    .set_token(token(api_key)?.expose_secret())
-                    .set_name(tc)
-                    .set_number_results(number_results)
-                    .set_request_type(RequestType::LocationInformation)
-                    .set_requestor_ref(requestor_ref)
-                    .send_request()
-                    .await?;
-
-                let ojp = OJP::try_from(response.as_str())?;
-                let place_result = ojp
-                    .place_results()
-                    .ok_or(OjpError::PlaceResultsNotFound)?
-                    .into_iter()
-                    .filter_map(|pr| pr.stop_place_ref())
-                    .collect::<Vec<_>>();
-                Ok::<Vec<i32>, OjpError>(place_result)
+                Self::find_location(tc, date_time, number_results, requestor_ref, api_key).await
             })
             .collect::<Vec<_>>();
         join_all(point_ref)
@@ -1067,9 +1076,9 @@ struct Service {
     line_ref: String,
     direction_ref: String,
     mode: Mode,
-    product_category: ProductCategory,
+    product_category: Option<ProductCategory>,
     published_service_name: Text,
-    train_number: u32,
+    train_number: String,
     #[serde(rename = "Attribute", default)]
     attributes: Vec<Attribute>,
     origin_text: Text,
@@ -1314,10 +1323,12 @@ struct PlaceMode {
     funicular_submode: String,
 }
 
+#[cfg(test)]
 mod test {
+    use crate::{OJP, RequestBuilder, RequestType, token};
+    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+    use secrecy::ExposeSecret;
     use std::error::Error;
-
-    use crate::OJP;
 
     #[allow(unused)]
     fn parse_xml(xml: &str) -> Result<OJP, Box<dyn Error>> {
@@ -1363,5 +1374,42 @@ mod test {
     #[test]
     fn trip_lots() {
         let _ojp = parse_xml("test_xml/trip_lots.xml").unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_location_information_service_simple() {
+        dotenvy::dotenv().ok(); // optional
+        let date_time = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2025, 11, 19).unwrap(),
+            NaiveTime::from_hms_milli_opt(20, 56, 28, 643).unwrap(),
+        );
+        let _response = RequestBuilder::new(date_time)
+            .set_token(token("TOKEN").unwrap().expose_secret())
+            .set_requestor_ref("Test")
+            .set_name("bern s")
+            .set_number_results(3)
+            .set_request_type(RequestType::LocationInformation)
+            .send_request()
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_trip_service_simple() {
+        dotenvy::dotenv().ok(); // optional
+        let date_time = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2025, 11, 19).unwrap(),
+            NaiveTime::from_hms_milli_opt(20, 56, 28, 643).unwrap(),
+        );
+        let _response = RequestBuilder::new(date_time)
+            .set_token(token("TOKEN").unwrap().expose_secret())
+            .set_requestor_ref("Test")
+            .set_number_results(3)
+            .set_request_type(RequestType::Trip)
+            .set_from(8503308)
+            .set_to(8503424)
+            .send_request()
+            .await
+            .unwrap();
     }
 }

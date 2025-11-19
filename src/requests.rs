@@ -129,7 +129,7 @@ impl RequestBuilder {
                 }
                 let req = format!(
 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-                            <OJP xmlns=\"http://www.vdv.de/ojp\" xmlns:siri=\"http://www.siri.org.uk/siri\" version=\"2.0\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://www.vdv.de/ojp ../../../../Downloads/OJP-changes_for_v1.1%20(1)/OJP-changes_for_v1.1/OJP.xsd\">
+                            <OJP xmlns=\"http://www.vdv.de/ojp\" xmlns:siri=\"http://www.siri.org.uk/siri\" version=\"2.0\">
                              	<OJPRequest>
                                     <siri:ServiceRequest>
                                         <siri:RequestTimestamp>{now}</siri:RequestTimestamp>
