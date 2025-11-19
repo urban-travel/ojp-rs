@@ -112,6 +112,8 @@ jobs:
       - name: cargo test
         run: cargo test --locked --all-features --all-targets
       - name: cargo run
+        env: # Or as an environment variable
+          TOKEN: ${{ secrets.TOKEN }}
         run: cargo run --locked --example find_journeys
   coverage:
     # use llvm-cov to build and collect coverage and outputs in a format that
