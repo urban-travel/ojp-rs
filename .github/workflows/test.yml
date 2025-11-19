@@ -112,7 +112,7 @@ jobs:
       - name: cargo test
         run: cargo test --locked --all-features --all-targets
       - name: cargo run
-        run: cargo rune --locked --example find_journeys
+        run: cargo run --locked --example find_journeys
   coverage:
     # use llvm-cov to build and collect coverage and outputs in a format that
     # is compatible with codecov.io
