@@ -1,5 +1,5 @@
 use chrono::{Local, NaiveDateTime};
-use ojp_reader::{OJP, SimplifiedTrip};
+use ojp_rs::{OJP, SimplifiedTrip};
 use rand::prelude::IndexedRandom;
 use std::error::Error;
 use tracing::{Level, span, warn};

@@ -1,7 +1,11 @@
 [package]
-name = "ojp_reader"
+name = "ojp-rs"
 version = "0.1.0"
 edition = "2024"
+description = "A library for interacting with Open Journey Planner (OJP) services"
+readme = "README.md"
+repository = "https://github.com/urban-travel/ojp-rs"
+license-file = "LICENSE"
 
 [dependencies]
 chrono = { version = "0.4.42", features = ["serde"] }

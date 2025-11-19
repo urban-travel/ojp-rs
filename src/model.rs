@@ -9,6 +9,7 @@ use quick_xml::DeError;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use thiserror::Error;
+use tracing::{Level, span};
 
 use crate::{RequestBuilder, RequestType, requests::RequestError};
 
@@ -286,7 +287,10 @@ impl OJP {
             .send_request()
             .await?;
 
-        let ojp = OJP::try_from(response.as_str()).inspect_err(|_e| {
+        let ojp = OJP::try_from(response.as_str()).inspect_err(|e| {
+            let span = span!(Level::WARN, "From response error");
+            let _guard = span.enter();
+            tracing::error!("{e}");
             let mut file = std::fs::File::create("debug.xml").unwrap();
             file.write_all(response.as_bytes()).unwrap();
         })?;
@@ -308,8 +312,11 @@ impl OJP {
                     msg: format!("No trip departig after {date_time} was found."),
                 })?;
 
-        SimplifiedTrip::try_from(ref_trip).inspect_err(|_e| {
-            let mut file = std::fs::File::create("debug.xml").unwrap();
+        SimplifiedTrip::try_from(ref_trip).inspect_err(|e| {
+            let span = span!(Level::WARN, "From ref_trip error");
+            let _guard = span.enter();
+            tracing::error!("{e}");
+            let mut file = std::fs::File::create("debug_simplified.xml").unwrap();
             file.write_all(response.as_bytes()).unwrap();
         })
     }
