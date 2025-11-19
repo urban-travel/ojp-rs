@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OJP version="2.0" xmlns="http://www.vdv.de/ojp" xmlns:siri="http://www.siri.org.uk/siri" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.vdv.de/ojp ../../../../OJP4/OJP.xsd">
+  <OJPRequest>
+    <siri:ServiceRequest>
+      <siri:RequestTimestamp>2024-06-01T11:24:34.598Z</siri:RequestTimestamp>
+      <siri:RequestorRef>MENTZRegTest</siri:RequestorRef>
+      <OJPLocationInformationRequest>
+        <siri:RequestTimestamp>2024-06-01T11:24:34.598Z</siri:RequestTimestamp>
+        <siri:MessageIdentifier>LIR-1c</siri:MessageIdentifier>
+        <InitialInput>
+          <GeoPosition>
+            <siri:Longitude>8.55330</siri:Longitude>
+            <siri:Latitude>47.37609</siri:Latitude>
+          </GeoPosition>
+        </InitialInput>
+        <Restrictions>
+          <Type>stop</Type>
+          <NumberOfResults>10</NumberOfResults>
+          <IncludePtModes>true</IncludePtModes>
+          <IncludeOperators>true</IncludeOperators>
+        </Restrictions>
+      </OJPLocationInformationRequest>
+    </siri:ServiceRequest>
+  </OJPRequest>
+</OJP>

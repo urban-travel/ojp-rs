@@ -1,0 +1,1360 @@
+#![allow(dead_code)]
+use std::fmt::Display;
+use std::num::ParseIntError;
+use std::{env::VarError, io::Write};
+
+use chrono::{DateTime, Duration, Local, NaiveDateTime, TimeDelta};
+use futures::future::join_all;
+use quick_xml::DeError;
+use secrecy::{ExposeSecret, SecretString};
+use serde::Deserialize;
+use thiserror::Error;
+
+use crate::{RequestBuilder, RequestType, requests::RequestError};
+
+pub fn token(api_key: &str) -> Result<SecretString, OjpError> {
+    let t = std::env::var(api_key)?;
+    Ok(SecretString::new(t.into()))
+}
+
+fn iso_to_uic(iso: &str) -> Option<i32> {
+    match iso.to_lowercase().as_str() {
+        "fi" => Some(10),
+        "ru" => Some(20),
+        "by" => Some(21),
+        "ua" => Some(22),
+        "md" => Some(23),
+        "lt" => Some(24),
+        "lv" => Some(25),
+        "ee" => Some(26),
+        "kz" => Some(27),
+        "ge" => Some(28),
+        "uz" => Some(29),
+        "kp" => Some(30),
+        "mn" => Some(31),
+        "nn" => Some(32),
+        "cn" => Some(33),
+        "la" => Some(34),
+        "cu" => Some(40),
+        "al" => Some(41),
+        "jp" => Some(42),
+        "ba" => Some(44),
+        "pl" => Some(51),
+        "bg" => Some(52),
+        "ro" => Some(53),
+        "cz" => Some(54),
+        "hu" => Some(55),
+        "sk" => Some(56),
+        "az" => Some(57),
+        "am" => Some(58),
+        "kg" => Some(59),
+        "ie" => Some(60),
+        "kr" => Some(61),
+        "me" => Some(62),
+        "mk" => Some(65),
+        "tj" => Some(66),
+        "tm" => Some(67),
+        "af" => Some(68),
+        "gb" => Some(70),
+        "es" => Some(71),
+        "rs" => Some(72),
+        "gr" => Some(73),
+        "se" => Some(74),
+        "tr" => Some(75),
+        "no" => Some(76),
+        "hr" => Some(78),
+        "si" => Some(79),
+        "de" => Some(80),
+        "at" => Some(81),
+        "lu" => Some(82),
+        "it" => Some(83),
+        "nl" => Some(84),
+        "ch" => Some(85),
+        "dk" => Some(86),
+        "fr" => Some(87),
+        "be" => Some(88),
+        "tz" => Some(89),
+        "eg" => Some(90),
+        "tn" => Some(91),
+        "dz" => Some(92),
+        "ma" => Some(93),
+        "pt" => Some(94),
+        "il" => Some(95),
+        "ir" => Some(96),
+        "sy" => Some(97),
+        "lb" => Some(98),
+        "iq" => Some(99),
+        _ => None,
+    }
+}
+
+fn sloid_to_didok(sloid: &str) -> Result<i32, OjpError> {
+    // Split SLOID into parts
+    let parts: Vec<&str> = sloid.split(':').collect();
+    if parts.len() < 4 {
+        return Err(OjpError::MalformedSloid(sloid.to_string())); // not enough parts
+    }
+
+    let iso = parts[0].to_lowercase();
+    let uic = iso_to_uic(iso.as_str()).ok_or_else(|| OjpError::FailedToConvertIsoCode(iso))?;
+
+    // Extract number and pad to 5 digits
+    let num_str = parts[3];
+    let num = num_str.parse::<i32>()?;
+
+    let didok = format!("{}{:05}", uic, num);
+    let didok = didok.parse::<i32>()?;
+
+    Ok(didok)
+}
+mod duration {
+    use chrono::Duration;
+    use serde::Deserialize;
+    use serde::de::{self, Deserializer};
+    use std::str::FromStr;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+
+        let (sign, s) = if let Some(s) = s.strip_prefix("PT") {
+            (1, s)
+        } else if let Some(s) = s.strip_prefix("-PT") {
+            (-1, s)
+        } else {
+            return Err(de::Error::custom(format!(
+                "duration does not start with PT or -PT, but is {s}"
+            )));
+        };
+        // TODO: Currently -PT is treated as negative Duration. But I'm not sure what that means...
+
+        let mut total_seconds = 0;
+        let mut current_number_str = String::new();
+
+        for c in s.chars() {
+            if c.is_ascii_digit() {
+                current_number_str.push(c);
+            } else {
+                if current_number_str.is_empty() {
+                    return Err(de::Error::custom(format!(
+                        "Expected a number before unit '{}'",
+                        c
+                    )));
+                }
+                let value = i64::from_str(&current_number_str).map_err(de::Error::custom)?;
+                match c {
+                    'H' => total_seconds += sign * value * 3600,
+                    'M' => total_seconds += sign * value * 60,
+                    'S' => total_seconds += sign * value,
+                    _ => return Err(de::Error::custom(format!("Invalid duration unit: {}", c))),
+                }
+                current_number_str.clear();
+            }
+        }
+
+        if !current_number_str.is_empty() {
+            return Err(de::Error::custom(
+                "Duration string ends with a number but no unit",
+            ));
+        }
+
+        Ok(Duration::seconds(total_seconds))
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum OjpError {
+    #[error("Failed to parse XML {0}")]
+    FailedToParseXml(DeError, String),
+    #[error("Failed to find trip from id: {dep_id}, to id: {arr_id}. Optional message: {msg}")]
+    FailedToFindTrip {
+        dep_id: i32,
+        arr_id: i32,
+        msg: String,
+    },
+    #[error("Unkown LegType")]
+    UnkownLegType,
+    #[error("Failed to parse {0}")]
+    ParseInt(#[from] ParseIntError),
+    #[error("Failed to convert to Simplified trip")]
+    FailedToConvertToSimplifiedTrip,
+    #[error("Failed to get API token: {0}")]
+    UnableToGetApiToken(#[from] VarError),
+    #[error("Request building error: {0}")]
+    RequestBuilderError(#[from] RequestError),
+    #[error("No place results found")]
+    PlaceResultsNotFound,
+    #[error("Malformed sloid: {0}")]
+    MalformedSloid(String),
+    #[error("Failed to convert ISO code to UIC: {0}")]
+    FailedToConvertIsoCode(String),
+}
+
+#[derive(Deserialize, Debug)]
+pub struct OJP {
+    #[serde(rename = "OJPResponse")]
+    ojp_response: OJPResponse,
+}
+
+impl OJP {
+    /// Given an array of `&str` containing names of places, returns  Finds `number_results` trip `from_id` to `to_id` at `date_time` using the OJP API.
+    /// The name of the environment variable needs to be profived through the varibale `api_key`.
+    pub async fn find_locations(
+        locations: &[&str],
+        date_time: NaiveDateTime,
+        number_results: u32,
+        requestor_ref: &str,
+        api_key: &str,
+    ) -> Result<Vec<i32>, OjpError> {
+        let point_ref = locations
+            .iter()
+            .map(|&tc| async move {
+                let response = RequestBuilder::new(date_time)
+                    .set_token(token(api_key)?.expose_secret())
+                    .set_name(tc)
+                    .set_number_results(number_results)
+                    .set_request_type(RequestType::LocationInformation)
+                    .set_requestor_ref(requestor_ref)
+                    .send_request()
+                    .await?;
+
+                let ojp = OJP::try_from(response.as_str())?;
+                let place_result = ojp
+                    .place_results()
+                    .ok_or(OjpError::PlaceResultsNotFound)?
+                    .into_iter()
+                    .filter_map(|pr| pr.stop_place_ref())
+                    .collect::<Vec<_>>();
+                Ok::<Vec<i32>, OjpError>(place_result)
+            })
+            .collect::<Vec<_>>();
+        join_all(point_ref)
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .map(|v: Vec<_>| v.into_iter().flatten().collect())
+    }
+
+    /// Finds `number_results` trips from a list of departures and arrivals at `date_time` using the OJP API.
+    /// The length of `departures` and `arrivals` must be the same.
+    /// The name of the environment variable needs to be profived through the varibale `api_key`.
+    pub async fn find_trips(
+        departures: &[i32],
+        arrivals: &[i32],
+        date_time: NaiveDateTime,
+        number_results: u32,
+        requestor_ref: &str,
+        api_key: &str,
+    ) -> Vec<Result<SimplifiedTrip, OjpError>> {
+        let ref_trips: Vec<_> = departures
+            .iter()
+            .zip(arrivals.iter())
+            .map(|(&from_id, &to_id)| async move {
+                Self::find_trip(
+                    from_id,
+                    to_id,
+                    date_time,
+                    number_results,
+                    requestor_ref,
+                    api_key,
+                )
+                .await
+            })
+            .collect();
+        join_all(ref_trips).await
+    }
+
+    /// Finds `number_results` trip `from_id` to `to_id` at `date_time` using the OJP API.
+    /// The name of the environment variable needs to be profived through the varibale `api_key`.
+    pub async fn find_trip(
+        from_id: i32,
+        to_id: i32,
+        date_time: NaiveDateTime,
+        number_results: u32,
+        requestor_ref: &str,
+        api_key: &str,
+    ) -> Result<SimplifiedTrip, OjpError> {
+        let response = RequestBuilder::new(date_time)
+            .set_token(token(api_key)?.expose_secret())
+            .set_from(from_id)
+            .set_to(to_id)
+            .set_number_results(number_results)
+            .set_request_type(RequestType::Trip)
+            .set_requestor_ref(requestor_ref)
+            .send_request()
+            .await?;
+
+        let ojp = OJP::try_from(response.as_str()).inspect_err(|_e| {
+            let mut file = std::fs::File::create("debug.xml").unwrap();
+            file.write_all(response.as_bytes()).unwrap();
+        })?;
+        let ojp = if let Some(msg) = ojp.error() {
+            Err(OjpError::FailedToFindTrip {
+                dep_id: from_id,
+                arr_id: to_id,
+                msg: msg.to_string(),
+            })
+        } else {
+            Ok(ojp)
+        }?;
+
+        let ref_trip =
+            ojp.trip_departing_after(date_time, 0)
+                .ok_or(OjpError::FailedToFindTrip {
+                    dep_id: from_id,
+                    arr_id: to_id,
+                    msg: format!("No trip departig after {date_time} was found."),
+                })?;
+
+        SimplifiedTrip::try_from(ref_trip).inspect_err(|_e| {
+            let mut file = std::fs::File::create("debug.xml").unwrap();
+            file.write_all(response.as_bytes()).unwrap();
+        })
+    }
+
+    /// Returns all trips from the OJP response
+    pub fn trips(&self) -> Option<Vec<&TripResult>> {
+        Some(
+            self.ojp_response
+                .service_delivery
+                .ojp_trip_delivery
+                .as_ref()?
+                .trip_results
+                .iter()
+                .collect(),
+        )
+    }
+
+    // Returns references over all all PlaceResults
+    pub fn place_results(&self) -> Option<Vec<&PlaceResult>> {
+        Some(
+            self.ojp_response
+                .service_delivery
+                .ojp_location_information_delivery
+                .as_ref()?
+                .place_results
+                .iter()
+                .collect(),
+        )
+    }
+
+    /// Returns all trips from the OJP response that are starting after `date_time`
+    pub fn trips_departing_after(&self, date_time: NaiveDateTime) -> Option<Vec<&TripResult>> {
+        let res = self
+            .trips()?
+            .into_iter()
+            .filter(|&t| t.trip.start_time.naive_local() >= date_time)
+            .collect::<Vec<_>>();
+        if res.is_empty() { None } else { Some(res) }
+    }
+
+    /// Returns the `index`-th Trip if existing
+    pub fn trip_departing_after(&self, date_time: NaiveDateTime, index: usize) -> Option<&Trip> {
+        Some(
+            &self
+                .trips_departing_after(date_time)?
+                .get(index)
+                .copied()?
+                .trip,
+        )
+    }
+
+    /// Returns the `index`-th Trip if existing
+    pub fn trip(&self, index: usize) -> Option<&Trip> {
+        Some(&self.trips()?.get(index).copied()?.trip)
+    }
+
+    // Returns the error message, if the OJP trip delivery returned an error (if no trip found for
+    // example)
+    pub fn error(&self) -> Option<&str> {
+        Some(
+            self.ojp_response
+                .service_delivery
+                .ojp_trip_delivery
+                .as_ref()?
+                .error_condition
+                .as_ref()?
+                .trip_problem_type
+                .as_str(),
+        )
+    }
+}
+
+impl TryFrom<&str> for OJP {
+    type Error = OjpError;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        quick_xml::de::from_str(value).map_err(|e| OjpError::FailedToParseXml(e, value.to_string()))
+    }
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct OJPResponse {
+    service_delivery: ServiceDelivery,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct ServiceDelivery {
+    response_timestamp: DateTime<Local>,
+    producer_ref: String,
+    #[serde(rename = "OJPTripDelivery")]
+    ojp_trip_delivery: Option<OJPTripDelivery>,
+    #[serde(rename = "OJPLocationInformationDelivery")]
+    ojp_location_information_delivery: Option<OJPLocationInformationDelivery>,
+    #[serde(rename = "OJPStopEventDelivery")]
+    ojp_stop_event_delivery: Option<OJPStopEventDelivery>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct TripResponseContext {
+    places: Option<Places>,
+    situations: Option<Situations>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct Situations {
+    #[serde(default)]
+    pt_situations: Vec<PtSituation>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct PtSituation {
+    creation_time: DateTime<Local>,
+    participation_ref: String,
+    situation_number: String,
+    version: i32,
+    source: Source,
+    validity_period: ValidityPeriod,
+    alert_cause: String,
+    priority: i32,
+    scope_type: String,
+    language: String,
+    #[serde(default)]
+    publishing_actions: Vec<PublishingAction>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct PublishingAction {
+    // TODO: Both are present until now, but they is an error that say they are missing
+    // the even when present. Impossible to know why.
+    publish_at_scope: Option<PublishAtScope>,
+    passenger_sinformation_action: Option<PassengerInformationAction>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct PassengerInformationAction {
+    #[serde(default)]
+    action_ref: String,
+    recorded_at_time: DateTime<Local>,
+    perspective: String,
+    textual_content: TextualContent,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct TextualContent {
+    summary_content: SummaryText,
+    reason_content: ReasonText,
+    duration_content: DurationText,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct SummaryText {
+    summary_text: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct ReasonText {
+    reason_text: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct DurationText {
+    duration_text: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct PublishAtScope {
+    scope_type: String,
+    #[serde(default)]
+    affects: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct ValidityPeriod {
+    start_time: DateTime<Local>,
+    end_time: DateTime<Local>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct Source {
+    #[serde(default)]
+    source_type: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct Places {
+    #[serde(rename = "Place", default)]
+    places: Vec<Place>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct OJPTripDelivery {
+    trip_response_context: Option<TripResponseContext>,
+    #[serde(rename = "TripResult", default)]
+    trip_results: Vec<TripResult>,
+    error_condition: Option<ErrorCondition>,
+    response_timestamp: DateTime<Local>,
+    request_message_ref: String,
+    default_language: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct ErrorCondition {
+    trip_problem_type: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+pub struct TripResult {
+    id: String,
+    trip: Trip,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+pub struct Trip {
+    id: String,
+    #[serde(with = "duration")]
+    duration: Duration,
+    start_time: DateTime<Local>,
+    end_time: DateTime<Local>,
+    transfers: u32,
+    distance: Option<u32>,
+    #[serde(rename = "Leg", default)]
+    legs: Vec<Leg>,
+}
+
+impl Trip {
+    pub fn legs(&self) -> Vec<&Leg> {
+        self.legs.iter().collect()
+    }
+
+    pub fn trip_info(&self) -> TripInfo {
+        TripInfo {
+            departure_time: self.start_time.naive_local(),
+            arrival_time: self.end_time.naive_local(),
+            duration: self.duration,
+        }
+    }
+}
+
+/// Basic trip information: departure time, arrival time, and duration
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TripInfo {
+    departure_time: NaiveDateTime,
+    arrival_time: NaiveDateTime,
+    duration: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct SimplifiedLeg {
+    departure_id: i32,
+    departure_stop: String,
+    arrival_id: i32,
+    arrival_stop: String,
+    departure_time: NaiveDateTime,
+    arrival_time: NaiveDateTime,
+    mode: String,
+}
+
+impl SimplifiedLeg {
+    pub fn new(
+        departure_id: i32,
+        departure_stop: &str,
+        arrival_id: i32,
+        arrival_stop: &str,
+        departure_time: NaiveDateTime,
+        arrival_time: NaiveDateTime,
+        mode: String,
+    ) -> Self {
+        SimplifiedLeg {
+            departure_id,
+            departure_stop: departure_stop.to_string(),
+            arrival_id,
+            arrival_stop: arrival_stop.to_string(),
+            departure_time,
+            arrival_time,
+            mode,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SimplifiedTrip {
+    legs: Vec<SimplifiedLeg>,
+}
+
+impl Display for SimplifiedTrip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "Trip from: {} to: {} departing at: {}",
+            self.departure_stop(),
+            self.arrival_stop(),
+            self.departure_time()
+        )?;
+        self.legs().iter().try_for_each(|l| {
+            writeln!(
+                f,
+                "[{:<8}]: {:<40} -> {:<40}, {} - {}",
+                l.mode,
+                l.departure_stop,
+                l.arrival_stop,
+                l.departure_time.format("%H:%M"),
+                l.arrival_time.format("%H:%M")
+            )
+        })
+    }
+}
+
+impl SimplifiedTrip {
+    pub fn new(legs: Vec<SimplifiedLeg>) -> Self {
+        SimplifiedTrip { legs }
+    }
+    pub fn legs(&self) -> Vec<&SimplifiedLeg> {
+        self.legs.iter().collect()
+    }
+
+    pub fn departure_time(&self) -> NaiveDateTime {
+        self.legs().first().map(|l| l.departure_time).unwrap()
+    }
+
+    pub fn arrival_time(&self) -> NaiveDateTime {
+        self.legs().last().map(|l| l.arrival_time).unwrap()
+    }
+
+    pub fn duration(&self) -> TimeDelta {
+        self.arrival_time() - self.departure_time()
+    }
+
+    pub fn departure_id(&self) -> i32 {
+        self.legs().first().map(|l| l.departure_id).unwrap()
+    }
+
+    pub fn arrival_id(&self) -> i32 {
+        self.legs().last().map(|l| l.arrival_id).unwrap()
+    }
+
+    pub fn departure_stop(&self) -> &str {
+        self.legs()
+            .first()
+            .map(|l| l.departure_stop.as_str())
+            .unwrap()
+    }
+
+    pub fn arrival_stop(&self) -> &str {
+        self.legs().last().map(|l| l.arrival_stop.as_str()).unwrap()
+    }
+
+    pub fn approx_equal(&self, rhs: &SimplifiedTrip, tolerance: f64) -> bool {
+        // deprature and arrival must be the same
+        if self.departure_id() != rhs.departure_id() || self.arrival_id() != rhs.arrival_id() {
+            return false;
+        }
+        // duration must be approximately equal
+        if (self.duration().as_seconds_f64() - rhs.duration().as_seconds_f64()).abs()
+            / rhs.duration().as_seconds_f64()
+            > tolerance
+        {
+            return false;
+        }
+
+        // departure and arrival time must be approximately the same with respect to duration
+        if (self.departure_time() - rhs.departure_time()).as_seconds_f64()
+            / self.duration().as_seconds_f64()
+            > tolerance
+            || (self.arrival_time() - rhs.arrival_time()).as_seconds_f64()
+                / self.duration().as_seconds_f64()
+                > tolerance
+        {
+            return false;
+        }
+        true
+    }
+}
+
+impl TryFrom<&Trip> for SimplifiedTrip {
+    type Error = OjpError;
+    fn try_from(value: &Trip) -> Result<Self, Self::Error> {
+        let mut prev_arr_time = value.start_time.naive_local();
+        let st: Vec<_> = value
+            .legs()
+            .into_iter()
+            .map(|leg| {
+                let typed_leg = LegType::try_from(leg)?;
+                let departure_id = typed_leg.departure_id()?;
+                let departure_stop = typed_leg.departure_stop();
+                let arrival_id = typed_leg.arrival_id()?;
+                let arrival_stop = typed_leg.arrival_stop();
+                let departure_time = typed_leg.departure_time().unwrap_or(prev_arr_time);
+                let arrival_time = typed_leg
+                    .arrival_time()
+                    .unwrap_or(prev_arr_time + typed_leg.duration());
+                prev_arr_time = arrival_time;
+                Ok(SimplifiedLeg::new(
+                    departure_id,
+                    departure_stop,
+                    arrival_id,
+                    arrival_stop,
+                    departure_time,
+                    arrival_time,
+                    typed_leg.mode().to_string(),
+                ))
+            })
+            .collect::<Result<Vec<_>, OjpError>>()?;
+        Ok(SimplifiedTrip { legs: st })
+    }
+}
+
+pub enum LegType<'a> {
+    Timed(&'a TimedLeg),
+    Transfer(&'a TransferLeg),
+    Continuous(&'a ContinuousLeg),
+}
+
+impl<'a> LegType<'a> {
+    pub fn duration(&'a self) -> TimeDelta {
+        match *self {
+            Self::Timed(tl) => tl.arrival_time() - tl.departure_time(),
+            Self::Transfer(t) => t.duration,
+            Self::Continuous(t) => t.duration,
+        }
+    }
+
+    pub fn departure_time(&'a self) -> Option<NaiveDateTime> {
+        match *self {
+            Self::Timed(tl) => Some(tl.departure_time().naive_local()),
+            Self::Transfer(_) => None,
+            Self::Continuous(_) => None,
+        }
+    }
+
+    pub fn arrival_time(&'a self) -> Option<NaiveDateTime> {
+        match *self {
+            Self::Timed(tl) => Some(tl.arrival_time().naive_local()),
+            Self::Transfer(_) => None,
+            Self::Continuous(_) => None,
+        }
+    }
+
+    pub fn departure_stop(&'a self) -> &'a str {
+        match *self {
+            Self::Timed(tl) => tl.departure_stop(),
+            Self::Transfer(t) => t.departure_stop(),
+            Self::Continuous(t) => t.departure_stop(),
+        }
+    }
+
+    pub fn arrival_stop(&'a self) -> &'a str {
+        match *self {
+            Self::Timed(tl) => tl.arrival_stop(),
+            Self::Transfer(t) => t.arrival_stop(),
+            Self::Continuous(t) => t.arrival_stop(),
+        }
+    }
+
+    pub fn departure_id(&'a self) -> Result<i32, OjpError> {
+        match *self {
+            Self::Timed(tl) => tl.departure_id(),
+            Self::Transfer(t) => t.departure_id(),
+            Self::Continuous(t) => t.departure_id(),
+        }
+    }
+
+    pub fn arrival_id(&'a self) -> Result<i32, OjpError> {
+        match *self {
+            Self::Timed(tl) => tl.arrival_id(),
+            Self::Transfer(t) => t.arrival_id(),
+            Self::Continuous(t) => t.arrival_id(),
+        }
+    }
+
+    pub fn mode(&self) -> &str {
+        match *self {
+            Self::Timed(tl) => tl.service.mode.name(),
+            Self::Transfer(t) => t.transfer_type.as_str(),
+            Self::Continuous(t) => t.service.personal_mode.as_str(),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a Leg> for LegType<'a> {
+    type Error = OjpError;
+    fn try_from(value: &'a Leg) -> Result<Self, Self::Error> {
+        if let Some(l) = value.timed_leg.as_ref() {
+            Ok(LegType::Timed(l))
+        } else if let Some(l) = value.transfer_leg.as_ref() {
+            Ok(LegType::Transfer(l))
+        } else if let Some(l) = value.continuous_leg.as_ref() {
+            Ok(LegType::Continuous(l))
+        } else {
+            Err(OjpError::UnkownLegType)
+        }
+    }
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+pub struct Leg {
+    id: u32,
+    #[serde(with = "duration")]
+    duration: Duration,
+    timed_leg: Option<TimedLeg>,
+    transfer_leg: Option<TransferLeg>,
+    continuous_leg: Option<ContinuousLeg>,
+    #[serde(rename = "EmissionCO2")]
+    emission_co2: Option<EmissionCO2>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+pub struct ContinuousLeg {
+    leg_start: LegEndpoint,
+    leg_end: LegEndpoint,
+    service: ContinuousService,
+    #[serde(with = "duration")]
+    duration: Duration,
+    length: i32,
+    leg_track: LegTrack,
+    path_guidance: PathGuidance,
+}
+
+impl ContinuousLeg {
+    pub fn departure_stop(&self) -> &str {
+        self.leg_start.name()
+    }
+
+    pub fn arrival_stop(&self) -> &str {
+        self.leg_end.name()
+    }
+
+    pub fn departure_id(&self) -> Result<i32, OjpError> {
+        self.leg_start.id()
+    }
+
+    pub fn arrival_id(&self) -> Result<i32, OjpError> {
+        self.leg_end.id()
+    }
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct ContinuousService {
+    personal_mode_of_operation: String,
+    personal_mode: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct PathGuidance {
+    #[serde(rename = "PathGuidanceSection", default)]
+    path_guidance_sections: Vec<PathGuidanceSection>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct PathGuidanceSection {
+    track_section: TrackSection,
+    turn_description: Text,
+    guidance_advice: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+pub struct TransferLeg {
+    transfer_type: String,
+    leg_start: LegEndpoint,
+    leg_end: LegEndpoint,
+    #[serde(with = "duration")]
+    duration: Duration,
+}
+
+impl TransferLeg {
+    pub fn departure_stop(&self) -> &str {
+        self.leg_start.name()
+    }
+
+    pub fn arrival_stop(&self) -> &str {
+        self.leg_end.name()
+    }
+
+    pub fn departure_id(&self) -> Result<i32, OjpError> {
+        self.leg_start.id()
+    }
+
+    pub fn arrival_id(&self) -> Result<i32, OjpError> {
+        self.leg_end.id()
+    }
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct LegEndpoint {
+    stop_point_ref: String,
+    name: Text,
+}
+
+impl LegEndpoint {
+    pub fn id(&self) -> Result<i32, OjpError> {
+        if let Ok(num) = self.stop_point_ref.parse::<i32>() {
+            Ok(num)
+        } else {
+            sloid_to_didok(&self.stop_point_ref)
+        }
+    }
+    pub fn name(&self) -> &str {
+        self.name.text.as_str()
+    }
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+pub struct TimedLeg {
+    leg_board: LegBoard,
+    leg_alight: LegAlight,
+    #[serde(rename = "LegIntermediate", default)]
+    leg_intermediates: Vec<LegIntermediate>,
+    service: Service,
+    leg_track: Option<LegTrack>,
+}
+
+impl TimedLeg {
+    pub fn departure_time(&self) -> DateTime<Local> {
+        self.leg_board.service_departure.timetabled_time
+    }
+
+    pub fn arrival_time(&self) -> DateTime<Local> {
+        self.leg_alight.service_arrival.timetabled_time
+    }
+
+    pub fn departure_id(&self) -> Result<i32, OjpError> {
+        self.leg_board.id()
+    }
+
+    pub fn arrival_id(&self) -> Result<i32, OjpError> {
+        self.leg_alight.id()
+    }
+
+    pub fn departure_stop(&self) -> &str {
+        self.leg_board.name()
+    }
+
+    pub fn arrival_stop(&self) -> &str {
+        self.leg_alight.name()
+    }
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct LegIntermediate {
+    stop_point_ref: String,
+    stop_point_name: Text,
+    name_suffix: Option<Text>,
+    planned_quay: Option<Text>,
+    service_arrival: Option<ServiceArrival>,
+    service_departure: Option<ServiceDeparture>,
+    order: u32,
+    #[serde(rename = "ExpectedDepartureOccupancy", default)]
+    expected_departure_occupancies: Vec<ExpectedDepartureOccupancy>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct LegBoard {
+    stop_point_ref: String,
+    stop_point_name: Text,
+    name_suffix: Option<Text>,
+    planned_quay: Option<Text>,
+    estimated_quay: Option<Text>,
+    service_departure: ServiceDeparture,
+    order: u32,
+    #[serde(rename = "ExpectedDepartureOccupancy", default)]
+    expected_departure_occupancies: Vec<ExpectedDepartureOccupancy>,
+}
+
+impl LegBoard {
+    pub fn id(&self) -> Result<i32, OjpError> {
+        if let Ok(num) = self.stop_point_ref.parse::<i32>() {
+            Ok(num)
+        } else {
+            sloid_to_didok(&self.stop_point_ref)
+        }
+    }
+    pub fn name(&self) -> &str {
+        self.stop_point_name.text.as_str()
+    }
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct LegAlight {
+    stop_point_ref: String,
+    stop_point_name: Text,
+    name_suffix: Option<Text>,
+    planned_quay: Option<Text>,
+    estimated_quay: Option<Text>,
+    service_arrival: ServiceArrival,
+    order: u32,
+}
+
+impl LegAlight {
+    pub fn id(&self) -> Result<i32, OjpError> {
+        if let Ok(num) = self.stop_point_ref.parse::<i32>() {
+            Ok(num)
+        } else {
+            sloid_to_didok(&self.stop_point_ref)
+        }
+    }
+    pub fn name(&self) -> &str {
+        self.stop_point_name.text.as_str()
+    }
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct ServiceDeparture {
+    timetabled_time: DateTime<Local>,
+    estimated_time: Option<DateTime<Local>>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct ServiceArrival {
+    timetabled_time: DateTime<Local>,
+    estimated_time: Option<DateTime<Local>>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct Service {
+    operating_day_ref: String,
+    journey_ref: String,
+    public_code: String,
+    line_ref: String,
+    direction_ref: String,
+    mode: Mode,
+    product_category: ProductCategory,
+    published_service_name: Text,
+    train_number: u32,
+    #[serde(rename = "Attribute", default)]
+    attributes: Vec<Attribute>,
+    origin_text: Text,
+    operator_ref: String,
+    destination_stop_point_ref: String,
+    destination_text: Text,
+    #[serde(default)]
+    origin_stop_point_ref: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct Mode {
+    pt_mode: String,
+    #[serde(default)]
+    rail_submode: String,
+    name: Text,
+    short_name: Text,
+}
+
+impl Mode {
+    pub fn name(&self) -> &str {
+        self.name.text.as_str()
+    }
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct ProductCategory {
+    name: Text,
+    short_name: Text,
+    product_category_ref: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct Attribute {
+    user_text: Text,
+    code: String,
+    importance: u32,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct Text {
+    text: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct EmissionCO2 {
+    kilogram_per_person_km: f32,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct ExpectedDepartureOccupancy {
+    fare_class: String,
+    occupancy_level: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct LegTrack {
+    track_section: TrackSection,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct TrackSection {
+    track_section_start: Option<TrackSectionEndpoint>,
+    track_section_end: Option<TrackSectionEndpoint>,
+    link_projection: Option<LinkProjection>,
+    road_name: Option<String>,
+    #[serde(with = "duration")]
+    duration: Duration,
+    length: i32,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct TrackSectionEndpoint {
+    stop_point_ref: String,
+    name: Text,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct LinkProjection {
+    #[serde(rename = "Position", default)]
+    positions: Vec<Position>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct Position {
+    longitude: f64,
+    latitude: f64,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct OJPLocationInformationDelivery {
+    #[serde(rename = "PlaceResult", default)]
+    place_results: Vec<PlaceResult>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct StopEventResponseContext {
+    places: Places,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct OJPStopEventDelivery {
+    stop_event_response_context: Option<StopEventResponseContext>,
+    #[serde(rename = "StopEventResult", default)]
+    stop_event_results: Vec<StopEventResult>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct StopEventResult {
+    id: String,
+    stop_event: StopEvent,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct StopEvent {
+    this_call: ThisCall,
+    service: Service,
+    operating_days: Option<OperatingDays>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct OperatingDays {
+    from: String,
+    to: String,
+    pattern: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct ThisCall {
+    call_at_stop: CallAtStop,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct CallAtStop {
+    stop_point_ref: String,
+    stop_point_name: Text,
+    service_departure: Option<ServiceDeparture>,
+    service_arrival: Option<ServiceArrival>,
+    order: u32,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+pub struct PlaceResult {
+    place: Place,
+    complete: bool,
+    probability: f64,
+}
+
+impl PlaceResult {
+    pub fn stop_place_ref(&self) -> Option<i32> {
+        Some(self.place.stop_place.as_ref()?.stop_place_ref)
+    }
+
+    pub fn stop_place_name(&self) -> Option<&str> {
+        Some(&self.place.stop_place.as_ref()?.stop_place_name.text)
+    }
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct Place {
+    stop_place: Option<StopPlace>,
+    topographic_place: Option<TopographicPlace>,
+    stop_point: Option<StopPoint>,
+    name: Text,
+    geo_position: GeoPosition,
+    #[serde(rename = "Mode", default)]
+    place_modes: Vec<PlaceMode>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct StopPoint {
+    stop_point_ref: String,
+    stop_point_name: Text,
+    private_code: PrivateCode,
+    parent_ref: String,
+    topographic_place_ref: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct TopographicPlace {
+    topographic_place_code: String,
+    topographic_place_name: Text,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct StopPlace {
+    stop_place_ref: i32,
+    stop_place_name: Text,
+    private_code: PrivateCode,
+    topographic_place_ref: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct PrivateCode {
+    system: String,
+    value: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct GeoPosition {
+    longitude: f64,
+    latitude: f64,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+struct PlaceMode {
+    pt_mode: String,
+    #[serde(default)]
+    rail_submode: String,
+    #[serde(default)]
+    tram_submode: String,
+    #[serde(default)]
+    bus_submode: String,
+    #[serde(default)]
+    funicular_submode: String,
+}
+
+mod test {
+    use std::error::Error;
+
+    use crate::OJP;
+
+    #[allow(unused)]
+    fn parse_xml(xml: &str) -> Result<OJP, Box<dyn Error>> {
+        let xml = std::fs::read_to_string(xml)?;
+        let ojp = super::OJP::try_from(xml.as_str())?;
+        Ok(ojp)
+    }
+    #[test]
+    fn location_coordinate() {
+        let _ojp = parse_xml("test_xml/location_coordinate.xml").unwrap();
+    }
+
+    #[test]
+    fn location_extended() {
+        let _ojp = parse_xml("test_xml/location_extended.xml").unwrap();
+    }
+
+    #[test]
+    fn location_simple() {
+        let _ojp = parse_xml("test_xml/location_simple.xml").unwrap();
+    }
+
+    #[test]
+    fn location_topographic() {
+        let _ojp = parse_xml("test_xml/location_topographic.xml").unwrap();
+    }
+
+    #[test]
+    fn stop_simple() {
+        let _ojp = parse_xml("test_xml/stop_simple.xml").unwrap();
+    }
+
+    #[test]
+    fn stop_complex() {
+        let _ojp = parse_xml("test_xml/stop_complex.xml").unwrap();
+    }
+
+    #[test]
+    fn trip_simple() {
+        let _ojp = parse_xml("test_xml/trip_simple.xml").unwrap();
+    }
+
+    #[test]
+    fn trip_lots() {
+        let _ojp = parse_xml("test_xml/trip_lots.xml").unwrap();
+    }
+}

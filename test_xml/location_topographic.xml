@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<OJP version="2.0" xmlns="http://www.vdv.de/ojp" xmlns:siri="http://www.siri.org.uk/siri">
+  <OJPResponse>
+    <siri:ServiceDelivery>
+      <siri:ResponseTimestamp>2025-10-17T10:41:28.5621937+02:00</siri:ResponseTimestamp>
+      <siri:ProducerRef>MENTZ</siri:ProducerRef>
+      <OJPLocationInformationDelivery>
+        <siri:ResponseTimestamp>2025-10-17T10:41:28.5618285+02:00</siri:ResponseTimestamp>
+        <siri:RequestMessageRef>00-d53bfff7078359b314a166a22f8af314-71c45b42ecfdf02a-00</siri:RequestMessageRef>
+        <siri:DefaultLanguage>de</siri:DefaultLanguage>
+        <PlaceResult>
+          <Place>
+            <TopographicPlace>
+              <TopographicPlaceCode>23017939:4</TopographicPlaceCode>
+              <TopographicPlaceName>
+                <Text xml:lang="de">Schaffhausen</Text>
+              </TopographicPlaceName>
+            </TopographicPlace>
+            <Name>
+              <Text xml:lang="de">Schaffhausen</Text>
+            </Name>
+            <GeoPosition>
+              <siri:Longitude>8.64219</siri:Longitude>
+              <siri:Latitude>47.70823</siri:Latitude>
+            </GeoPosition>
+          </Place>
+          <Complete>true</Complete>
+          <Probability>0.773</Probability>
+        </PlaceResult>
+      </OJPLocationInformationDelivery>
+    </siri:ServiceDelivery>
+  </OJPResponse>
+</OJP>
