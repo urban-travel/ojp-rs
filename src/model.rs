@@ -1329,6 +1329,7 @@ mod test {
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
     use secrecy::ExposeSecret;
     use std::error::Error;
+    use test_log::test;
 
     #[allow(unused)]
     fn parse_xml(xml: &str) -> Result<OJP, Box<dyn Error>> {
@@ -1377,6 +1378,7 @@ mod test {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[test_log::test]
     async fn request_location_information_service_simple() {
         dotenvy::dotenv().ok(); // optional
         let date_time = NaiveDateTime::new(
@@ -1395,6 +1397,7 @@ mod test {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[test_log::test]
     async fn request_trip_service_simple() {
         dotenvy::dotenv().ok(); // optional
         let date_time = NaiveDateTime::new(

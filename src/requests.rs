@@ -1,9 +1,13 @@
+use std::fmt::Display;
+
 use chrono::{DateTime, Local, NaiveDateTime, SecondsFormat, Utc};
 use reqwest::Client;
 use thiserror::Error;
+use tracing::{Level, span};
 
 const URL: &str = "https://api.opentransportdata.swiss/ojp20";
 
+#[derive(Debug)]
 pub enum RequestType {
     LocationInformation,
     Trip,
@@ -45,6 +49,7 @@ impl TryFrom<RequestType> for String {
     }
 }
 
+#[derive(Debug)]
 pub struct RequestBuilder {
     token: Option<String>,
     date_time: DateTime<Utc>,
@@ -199,18 +204,72 @@ impl RequestBuilder {
         if self.token.is_none() {
             return Err(RequestError::MissingAuthToken);
         }
-
+        {
+            let span = span!(Level::INFO, "Performing OJP request");
+            let _guard = span.enter();
+            tracing::info!("{}", self);
+        }
         let req = Client::new()
             .post(URL)
             .header("Content-Type", "application/xml")
             .header("accept", "*/*")
             .bearer_auth(self.token.as_ref().unwrap())
             .body(id_request);
+
         Ok(req)
     }
 
     pub async fn send_request(self) -> Result<String, RequestError> {
         let respone = self.build_request()?.send().await?.text().await?;
         Ok(respone)
+    }
+}
+
+impl Display for RequestBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let token = self
+            .token
+            .as_ref()
+            .map(|_| "Redacted")
+            .unwrap_or("Undefined");
+
+        // name: Option<String>,
+        match self.request_type {
+            RequestType::LocationInformation => {
+                write!(f, "Location Information Request: ")?;
+                write!(
+                    f,
+                    "Location: {}, ",
+                    self.name
+                        .as_ref()
+                        .map(|i| i.to_string())
+                        .unwrap_or("Undefined".to_string()),
+                )?;
+            }
+            RequestType::Trip => {
+                write!(f, "Trip Request: ")?;
+                write!(
+                    f,
+                    "From: {}, To: {}, ",
+                    self.from
+                        .map(|i| format!("{i}"))
+                        .unwrap_or("Undefined".to_string()),
+                    self.to
+                        .map(|i| format!("{i}"))
+                        .unwrap_or("Undefined".to_string()),
+                )?;
+            }
+            RequestType::StopEvent => {
+                write!(f, "Stop Envent Request Not Implement. ")?;
+            }
+            RequestType::Unknown => {
+                write!(f, "RequestType is unknown. ")?;
+            }
+        }
+        write!(
+            f,
+            "NumberResults: {}, DateTime: {}, RequestorRef: {}, Token: {token}",
+            self.number_results, self.date_time, self.requestor_ref
+        )
     }
 }
