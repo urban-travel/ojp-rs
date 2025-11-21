@@ -2,6 +2,7 @@ use std::fmt::Display;
 
 use chrono::{DateTime, Local, NaiveDateTime, SecondsFormat, Utc};
 use reqwest::Client;
+use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 use tracing::{Level, span};
 
@@ -51,7 +52,7 @@ impl TryFrom<RequestType> for String {
 
 #[derive(Debug)]
 pub struct RequestBuilder {
-    token: Option<String>,
+    token: Option<SecretString>,
     date_time: DateTime<Utc>,
     request_type: RequestType,
     number_results: u32,
@@ -93,8 +94,8 @@ impl RequestBuilder {
         self
     }
 
-    pub fn set_token(mut self, token: &str) -> Self {
-        self.token = Some(token.to_string());
+    pub fn set_token(mut self, token: SecretString) -> Self {
+        self.token = Some(token);
         self
     }
 
@@ -209,11 +210,13 @@ impl RequestBuilder {
             let _guard = span.enter();
             tracing::info!("{}", self);
         }
+        let token = self.token.ok_or(RequestError::MissingAuthToken)?;
+
         let req = Client::new()
             .post(URL)
             .header("Content-Type", "application/xml")
             .header("accept", "*/*")
-            .bearer_auth(self.token.as_ref().unwrap())
+            .bearer_auth(token.expose_secret())
             .body(id_request);
 
         Ok(req)
@@ -230,10 +233,9 @@ impl Display for RequestBuilder {
         let token = self
             .token
             .as_ref()
-            .map(|_| "Redacted")
-            .unwrap_or("Undefined");
+            .map(|s| format!("{:?}", s))
+            .unwrap_or("Undefined".to_string());
 
-        // name: Option<String>,
         match self.request_type {
             RequestType::LocationInformation => {
                 write!(f, "Location Information Request: ")?;

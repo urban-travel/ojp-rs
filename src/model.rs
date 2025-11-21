@@ -6,7 +6,7 @@ use std::{env::VarError, io::Write};
 use chrono::{DateTime, Duration, Local, NaiveDateTime, TimeDelta};
 use futures::future::join_all;
 use quick_xml::DeError;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 use serde::Deserialize;
 use thiserror::Error;
 use tracing::{Level, span};
@@ -208,7 +208,7 @@ impl OJP {
         api_key: &str,
     ) -> Result<Vec<i32>, OjpError> {
         let response = RequestBuilder::new(date_time)
-            .set_token(token(api_key)?.expose_secret())
+            .set_token(token(api_key)?)
             .set_name(location)
             .set_number_results(number_results)
             .set_request_type(RequestType::LocationInformation)
@@ -287,7 +287,7 @@ impl OJP {
         api_key: &str,
     ) -> Result<SimplifiedTrip, OjpError> {
         let response = RequestBuilder::new(date_time)
-            .set_token(token(api_key)?.expose_secret())
+            .set_token(token(api_key)?)
             .set_from(from_id)
             .set_to(to_id)
             .set_number_results(number_results)
@@ -1327,7 +1327,6 @@ struct PlaceMode {
 mod test {
     use crate::{OJP, RequestBuilder, RequestType, token};
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
-    use secrecy::ExposeSecret;
     use std::error::Error;
     use test_log::test;
 
@@ -1385,8 +1384,8 @@ mod test {
             NaiveDate::from_ymd_opt(2025, 11, 19).unwrap(),
             NaiveTime::from_hms_milli_opt(20, 56, 28, 643).unwrap(),
         );
-        let _response = RequestBuilder::new(date_time)
-            .set_token(token("TOKEN").unwrap().expose_secret())
+        let response = RequestBuilder::new(date_time)
+            .set_token(token("TOKEN").unwrap())
             .set_requestor_ref("Test")
             .set_name("bern s")
             .set_number_results(3)
@@ -1394,6 +1393,7 @@ mod test {
             .send_request()
             .await
             .unwrap();
+        let _ojp = OJP::try_from(response.as_str()).unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1404,8 +1404,8 @@ mod test {
             NaiveDate::from_ymd_opt(2025, 11, 19).unwrap(),
             NaiveTime::from_hms_milli_opt(20, 56, 28, 643).unwrap(),
         );
-        let _response = RequestBuilder::new(date_time)
-            .set_token(token("TOKEN").unwrap().expose_secret())
+        let response = RequestBuilder::new(date_time)
+            .set_token(token("TOKEN").unwrap())
             .set_requestor_ref("Test")
             .set_number_results(3)
             .set_request_type(RequestType::Trip)
@@ -1414,5 +1414,6 @@ mod test {
             .send_request()
             .await
             .unwrap();
+        let _ojp = OJP::try_from(response.as_str()).unwrap();
     }
 }
