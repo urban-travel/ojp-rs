@@ -343,6 +343,12 @@ impl OJP {
         )
     }
 
+    pub fn fastest_trip(&self) -> Option<&Trip> {
+        let mut trips = self.trips()?;
+        trips.sort_by_key(|t| t.trip.duration);
+        trips.first().map(|t| &t.trip)
+    }
+
     // Returns references over all all PlaceResults
     pub fn place_results(&self) -> Option<Vec<&PlaceResult>> {
         Some(
@@ -364,6 +370,12 @@ impl OJP {
             .filter(|&t| t.trip.start_time.naive_local() >= date_time)
             .collect::<Vec<_>>();
         if res.is_empty() { None } else { Some(res) }
+    }
+
+    pub fn fastest_trip_departing_after(&self, date_time: NaiveDateTime) -> Option<&Trip> {
+        let mut trips = self.trips_departing_after(date_time)?;
+        trips.sort_by_key(|t| t.trip.duration);
+        trips.first().map(|t| &t.trip)
     }
 
     /// Returns the `index`-th Trip if existing
@@ -553,6 +565,12 @@ pub struct TripResult {
     trip: Trip,
 }
 
+impl TripResult {
+    pub fn trip(&self) -> &Trip {
+        &self.trip
+    }
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
 pub struct Trip {
@@ -570,6 +588,18 @@ pub struct Trip {
 impl Trip {
     pub fn legs(&self) -> Vec<&Leg> {
         self.legs.iter().collect()
+    }
+
+    pub fn departure_time(&self) -> NaiveDateTime {
+        self.start_time.naive_local()
+    }
+
+    pub fn arrival_time_time(&self) -> NaiveDateTime {
+        self.end_time.naive_local()
+    }
+
+    pub fn duration(&self) -> TimeDelta {
+        self.duration
     }
 
     pub fn trip_info(&self) -> TripInfo {
