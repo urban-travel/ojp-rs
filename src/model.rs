@@ -754,7 +754,6 @@ impl TryFrom<&Trip> for SimplifiedTrip {
             .legs()
             .into_iter()
             .map(|leg| {
-                eprintln!("{:?}", leg);
                 let typed_leg = LegType::try_from(leg)?;
                 let departure_id = typed_leg.departure_id()?;
                 let departure_stop = typed_leg.departure_stop();
@@ -1389,7 +1388,9 @@ mod test {
 
     #[test]
     fn location_simple() {
-        let _ojp = parse_xml("test_xml/location_simple.xml").unwrap();
+        let ojp = parse_xml("test_xml/location_simple.xml").unwrap();
+        let place_results = ojp.place_results().unwrap();
+        assert_eq!(place_results.len(), 14);
     }
 
     #[test]
