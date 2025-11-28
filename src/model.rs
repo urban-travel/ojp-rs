@@ -163,6 +163,64 @@ mod duration {
 
         Ok(Duration::seconds(total_seconds))
     }
+
+    // src/serde_duration.rs  (or wherever your deserialize() lives)
+
+    #[cfg(test)]
+    mod tests {
+        use super::*; // brings `deserialize` into scope
+        use chrono::Duration;
+        use quick_xml::DeError;
+        use serde::de::IntoDeserializer;
+
+        fn parse(s: &str) -> Result<Duration, DeError> {
+            let de = s.into_deserializer();
+            deserialize(de)
+        }
+
+        #[test]
+        fn parses_minutes_only() {
+            let d = parse("PT20M").unwrap();
+            assert_eq!(d, Duration::seconds(20 * 60));
+        }
+
+        #[test]
+        fn parses_hours_and_minutes() {
+            let d = parse("PT5H30M").unwrap();
+            assert_eq!(d, Duration::seconds(5 * 3600 + 30 * 60));
+        }
+
+        #[test]
+        fn parses_hours_and_minutes_and_seconds() {
+            let d = parse("PT5H30M05S").unwrap();
+            assert_eq!(d, Duration::seconds(5 * 3600 + 30 * 60 + 5));
+        }
+
+        #[test]
+        fn parses_seconds_with_fraction() {
+            let d = parse("PT1M30S").unwrap();
+            let expected = Duration::seconds(60 + 30);
+            assert_eq!(d, expected);
+        }
+
+        #[test]
+        fn zero_duration_is_valid() {
+            let d = parse("PT0S").unwrap();
+            assert_eq!(d, Duration::seconds(0));
+        }
+
+        #[test]
+        #[should_panic]
+        fn rejects_invalid_lexical_form() {
+            let _ = parse("P1D2H").unwrap();
+        }
+
+        #[test]
+        fn negative_duration_accepted() {
+            let d = parse("-PT10S").unwrap();
+            assert_eq!(d, Duration::seconds(-10));
+        }
+    }
 }
 
 #[derive(Debug, Error)]
