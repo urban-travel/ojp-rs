@@ -3,7 +3,7 @@ use std::fmt::Display;
 use std::num::ParseIntError;
 use std::{env::VarError, io::Write};
 
-use chrono::{DateTime, Duration, Local, NaiveDateTime, TimeDelta};
+use chrono::{DateTime, Duration, NaiveDateTime, TimeDelta, Utc};
 use futures::future::join_all;
 use quick_xml::DeError;
 use secrecy::SecretString;
@@ -367,7 +367,7 @@ impl OJP {
         let res = self
             .trips()?
             .into_iter()
-            .filter(|&t| t.trip.start_time.naive_local() >= date_time)
+            .filter(|&t| t.trip.start_time.naive_utc() >= date_time)
             .collect::<Vec<_>>();
         if res.is_empty() { None } else { Some(res) }
     }
@@ -426,7 +426,7 @@ struct OJPResponse {
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
 struct ServiceDelivery {
-    response_timestamp: DateTime<Local>,
+    response_timestamp: DateTime<Utc>,
     producer_ref: String,
     #[serde(rename = "OJPTripDelivery")]
     ojp_trip_delivery: Option<OJPTripDelivery>,
@@ -453,7 +453,7 @@ struct Situations {
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
 struct PtSituation {
-    creation_time: DateTime<Local>,
+    creation_time: DateTime<Utc>,
     participation_ref: String,
     situation_number: String,
     version: i32,
@@ -481,7 +481,7 @@ struct PublishingAction {
 struct PassengerInformationAction {
     #[serde(default)]
     action_ref: String,
-    recorded_at_time: DateTime<Local>,
+    recorded_at_time: DateTime<Utc>,
     perspective: String,
     textual_content: TextualContent,
 }
@@ -523,8 +523,8 @@ struct PublishAtScope {
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
 struct ValidityPeriod {
-    start_time: DateTime<Local>,
-    end_time: DateTime<Local>,
+    start_time: DateTime<Utc>,
+    end_time: DateTime<Utc>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -547,7 +547,7 @@ struct OJPTripDelivery {
     #[serde(rename = "TripResult", default)]
     trip_results: Vec<TripResult>,
     error_condition: Option<ErrorCondition>,
-    response_timestamp: DateTime<Local>,
+    response_timestamp: DateTime<Utc>,
     request_message_ref: String,
     default_language: String,
 }
@@ -577,8 +577,8 @@ pub struct Trip {
     id: String,
     #[serde(with = "duration")]
     duration: Duration,
-    start_time: DateTime<Local>,
-    end_time: DateTime<Local>,
+    start_time: DateTime<Utc>,
+    end_time: DateTime<Utc>,
     transfers: u32,
     distance: Option<u32>,
     #[serde(rename = "Leg", default)]
@@ -591,11 +591,11 @@ impl Trip {
     }
 
     pub fn departure_time(&self) -> NaiveDateTime {
-        self.start_time.naive_local()
+        self.start_time.naive_utc()
     }
 
     pub fn arrival_time_time(&self) -> NaiveDateTime {
-        self.end_time.naive_local()
+        self.end_time.naive_utc()
     }
 
     pub fn duration(&self) -> TimeDelta {
@@ -604,8 +604,8 @@ impl Trip {
 
     pub fn trip_info(&self) -> TripInfo {
         TripInfo {
-            departure_time: self.start_time.naive_local(),
-            arrival_time: self.end_time.naive_local(),
+            departure_time: self.start_time.naive_utc(),
+            arrival_time: self.end_time.naive_utc(),
             duration: self.duration,
         }
     }
@@ -749,11 +749,12 @@ impl SimplifiedTrip {
 impl TryFrom<&Trip> for SimplifiedTrip {
     type Error = OjpError;
     fn try_from(value: &Trip) -> Result<Self, Self::Error> {
-        let mut prev_arr_time = value.start_time.naive_local();
+        let mut prev_arr_time = value.start_time.naive_utc();
         let st: Vec<_> = value
             .legs()
             .into_iter()
             .map(|leg| {
+                eprintln!("{:?}", leg);
                 let typed_leg = LegType::try_from(leg)?;
                 let departure_id = typed_leg.departure_id()?;
                 let departure_stop = typed_leg.departure_stop();
@@ -796,7 +797,7 @@ impl<'a> LegType<'a> {
 
     pub fn departure_time(&'a self) -> Option<NaiveDateTime> {
         match *self {
-            Self::Timed(tl) => Some(tl.departure_time().naive_local()),
+            Self::Timed(tl) => Some(tl.departure_time().naive_utc()),
             Self::Transfer(_) => None,
             Self::Continuous(_) => None,
         }
@@ -804,7 +805,7 @@ impl<'a> LegType<'a> {
 
     pub fn arrival_time(&'a self) -> Option<NaiveDateTime> {
         match *self {
-            Self::Timed(tl) => Some(tl.arrival_time().naive_local()),
+            Self::Timed(tl) => Some(tl.arrival_time().naive_utc()),
             Self::Transfer(_) => None,
             Self::Continuous(_) => None,
         }
@@ -992,12 +993,20 @@ pub struct TimedLeg {
 }
 
 impl TimedLeg {
-    pub fn departure_time(&self) -> DateTime<Local> {
-        self.leg_board.service_departure.timetabled_time
+    pub fn departure_time(&self) -> DateTime<Utc> {
+        if let Some(time) = self.leg_board.service_departure.estimated_time {
+            time
+        } else {
+            self.leg_board.service_departure.timetabled_time
+        }
     }
 
-    pub fn arrival_time(&self) -> DateTime<Local> {
-        self.leg_alight.service_arrival.timetabled_time
+    pub fn arrival_time(&self) -> DateTime<Utc> {
+        if let Some(time) = self.leg_alight.service_arrival.estimated_time {
+            time
+        } else {
+            self.leg_alight.service_arrival.timetabled_time
+        }
     }
 
     pub fn departure_id(&self) -> Result<i32, OjpError> {
@@ -1086,15 +1095,15 @@ impl LegAlight {
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
 struct ServiceDeparture {
-    timetabled_time: DateTime<Local>,
-    estimated_time: Option<DateTime<Local>>,
+    timetabled_time: DateTime<Utc>,
+    estimated_time: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
 struct ServiceArrival {
-    timetabled_time: DateTime<Local>,
-    estimated_time: Option<DateTime<Local>>,
+    timetabled_time: DateTime<Utc>,
+    estimated_time: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -1355,10 +1364,12 @@ struct PlaceMode {
 
 #[cfg(test)]
 mod test {
-    use crate::{OJP, RequestBuilder, RequestType, token};
+    use crate::{OJP, RequestBuilder, RequestType, SimplifiedTrip, token};
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
     use std::error::Error;
     use test_log::test;
+
+    const FORMAT: &str = "%Y-%m-%dT%H:%M:%SZ";
 
     #[allow(unused)]
     fn parse_xml(xml: &str) -> Result<OJP, Box<dyn Error>> {
@@ -1398,7 +1409,47 @@ mod test {
 
     #[test]
     fn trip_simple() {
-        let _ojp = parse_xml("test_xml/trip_simple.xml").unwrap();
+        let ojp = parse_xml("test_xml/trip_simple.xml").unwrap();
+        let fastest_trip = ojp.fastest_trip().unwrap();
+        assert_eq!(fastest_trip.duration.num_seconds(), 3 * 60 + 30);
+        let trip_after = ojp
+            .trip_departing_after(
+                NaiveDateTime::parse_from_str("2025-10-17T09:00:00Z", FORMAT).unwrap(),
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(
+            trip_after.start_time.naive_utc(),
+            NaiveDateTime::parse_from_str("2025-10-17T09:07:24Z", FORMAT).unwrap()
+        );
+        assert_eq!(
+            trip_after.end_time.naive_utc(),
+            NaiveDateTime::parse_from_str("2025-10-17T09:10:54Z", FORMAT).unwrap()
+        );
+
+        assert_eq!(trip_after.id, "ID-5CE0364E-BD0F-4D17-929E-B3E4F4EAA714");
+
+        let simplified_trip = SimplifiedTrip::try_from(trip_after).unwrap();
+        assert_eq!(
+            simplified_trip.departure_time(),
+            NaiveDateTime::parse_from_str("2025-10-17T09:07:24Z", FORMAT).unwrap()
+        );
+        assert_eq!(
+            simplified_trip.arrival_time(),
+            NaiveDateTime::parse_from_str("2025-10-17T09:10:54Z", FORMAT).unwrap()
+        );
+
+        let trips = ojp.trips().unwrap();
+        assert_eq!(trips.len(), 3);
+        assert_eq!(
+            ojp.trips_departing_after(
+                NaiveDateTime::parse_from_str("2025-10-17T09:00:00Z", FORMAT).unwrap(),
+            )
+            .unwrap()
+            .len(),
+            2
+        );
     }
 
     #[test]
